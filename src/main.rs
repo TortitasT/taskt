@@ -134,14 +134,7 @@ impl Todo {
     fn save(&self) -> Result<(), std::io::Error> {
         let data = serde_json::to_string(&self.tasks)?;
 
-        let path = ProjectDirs::from("eu", "tortitas", "todot")
-            .unwrap()
-            .data_dir()
-            .to_path_buf();
-
-        ensure_dir_exists(&path).unwrap();
-
-        let path = path.join(DB_FILE);
+        let path = get_database_path();
 
         match std::fs::write(path, data) {
             Ok(_) => Ok(()),
@@ -150,10 +143,7 @@ impl Todo {
     }
 
     fn load() -> Result<Todo, std::io::Error> {
-        let path = ProjectDirs::from("eu", "tortitas", "todot")
-            .unwrap()
-            .data_dir()
-            .join(DB_FILE);
+        let path = get_database_path();
 
         let data = std::fs::read_to_string(path)?;
 
@@ -178,6 +168,17 @@ impl Todo {
             self.current_task += 1;
         }
     }
+}
+
+fn get_database_path() -> PathBuf {
+    let path = ProjectDirs::from("eu", "tortitas", "todot")
+        .unwrap()
+        .data_dir()
+        .to_path_buf();
+
+    ensure_dir_exists(&path).unwrap();
+
+    path.join(DB_FILE)
 }
 
 fn main() -> Result<(), io::Error> {
