@@ -1,8 +1,8 @@
 use std::{
-    collections::HashMap,
     error::Error,
+    fs,
     io::{self, Stdout},
-    thread,
+    path::PathBuf,
     time::Duration,
 };
 
@@ -11,88 +11,179 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, LeaveAlternateScreen},
 };
 use crossterm::{execute, terminal::EnterAlternateScreen};
+use directories::ProjectDirs;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
     text::Text,
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
+use serde::{Deserialize, Serialize};
 
-const DB_PATH: &str = "db.json";
+const DB_FILE: &str = "db.json";
+const DEBUG: bool = false;
 
 #[derive(PartialEq, Eq)]
 enum Mode {
     Normal,
     Insert,
+    Delete,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Task {
+    text: String,
+    completed: bool,
+}
+impl Task {
+    fn new(text: String) -> Self {
+        Self {
+            text,
+            completed: false,
+        }
+    }
 }
 
 struct Todo {
-    tasks: HashMap<String, bool>,
+    tasks: Vec<Task>,
     new_task_text: String,
     mode: Mode,
+    current_task: usize,
 }
 impl Todo {
-    fn insert(&mut self, task: String) {
-        self.tasks.insert(task.clone(), false);
+    fn new() -> Self {
+        Self {
+            tasks: Vec::new(),
+            new_task_text: String::new(),
+            mode: Mode::Normal,
+            current_task: 0,
+        }
     }
 
-    fn toggle(&mut self, task: &String) {
-        let found_task = self.tasks.get_mut(task);
+    fn insert(&mut self, text: String) {
+        self.tasks.insert(self.tasks.len(), Task::new(text));
+        self.current_task = self.tasks.len() - 1;
+
+        self.save().unwrap();
+    }
+
+    fn toggle(&mut self) {
+        let found_task = self.tasks.get_mut(self.current_task);
 
         match found_task {
-            Some(value) => {
-                *value = !*value;
+            Some(task) => {
+                task.completed = !task.completed;
             }
             None => {}
         }
+
+        self.save().unwrap();
     }
 
     fn list(&self) -> Vec<ListItem> {
         let mut items = Vec::new();
 
-        for (task, status) in &self.tasks {
-            let formated_status = if *status { "[x]" } else { "[ ]" };
+        for (index, task) in self.tasks.iter().enumerate() {
+            let formated_status = if task.completed { "[x]" } else { "[ ]" };
 
-            items.push(ListItem::new(format!("{} - {}", formated_status, task)));
+            let formatted_text = if DEBUG {
+                format!(
+                    "{} {} => {} - {}",
+                    &self.current_task, index, formated_status, task.text
+                )
+            } else {
+                format!("{} {}", formated_status, task.text)
+            };
+
+            let list_item = ListItem::new(formatted_text);
+
+            let style = match self.current_task == items.len() {
+                true => Style::default().add_modifier(Modifier::BOLD),
+                false => Style::default(),
+            };
+
+            let style = match task.completed {
+                true => style.fg(Color::Green),
+                false => style.fg(Color::Yellow),
+            };
+
+            items.push(list_item.style(style));
         }
 
         items
     }
 
-    fn delete(&mut self, task: &String) {
-        self.tasks.remove(task);
+    fn delete(&mut self) {
+        if self.tasks.is_empty() {
+            return;
+        }
+
+        self.tasks.remove(self.current_task);
+
+        self.current_task = if self.current_task > 0 {
+            self.current_task - 1
+        } else {
+            0
+        };
+
+        self.save().unwrap();
     }
 
     fn save(&self) -> Result<(), std::io::Error> {
         let data = serde_json::to_string(&self.tasks)?;
 
-        std::fs::write(DB_PATH, data)?;
+        let path = ProjectDirs::from("eu", "tortitas", "todot")
+            .unwrap()
+            .data_dir()
+            .to_path_buf();
 
-        Ok(())
+        ensure_dir_exists(&path).unwrap();
+
+        let path = path.join(DB_FILE);
+
+        match std::fs::write(path, data) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     fn load() -> Result<Todo, std::io::Error> {
-        let data = std::fs::read_to_string(DB_PATH)?;
+        let path = ProjectDirs::from("eu", "tortitas", "todot")
+            .unwrap()
+            .data_dir()
+            .join(DB_FILE);
 
-        let tasks: HashMap<String, bool> = serde_json::from_str(&data)?;
+        let data = std::fs::read_to_string(path)?;
+
+        let tasks: Vec<Task> = serde_json::from_str(&data)?;
 
         Ok(Todo {
             tasks,
             new_task_text: String::new(),
             mode: Mode::Normal,
+            current_task: 0,
         })
+    }
+
+    fn prev(&mut self) {
+        if self.current_task > 0 {
+            self.current_task -= 1;
+        }
+    }
+
+    fn next(&mut self) {
+        if self.current_task < self.tasks.len() - 1 {
+            self.current_task += 1;
+        }
     }
 }
 
 fn main() -> Result<(), io::Error> {
     let mut todo = match Todo::load() {
         Ok(todo) => todo,
-        Err(_) => Todo {
-            tasks: HashMap::new(),
-            new_task_text: String::new(),
-            mode: Mode::Normal,
-        },
+        Err(_) => Todo::new(),
     };
 
     let mut terminal = setup_terminal().unwrap();
@@ -152,14 +243,14 @@ fn draw(
         let tasks =
             List::new(todo.list()).block(Block::default().title("Tasks").borders(Borders::ALL));
 
-        let new_task_text = if todo.mode == Mode::Normal {
-            "Press i to add a task"
-        } else {
-            &todo.new_task_text
+        let new_task_text = match todo.mode {
+            Mode::Normal => "Add a task (Press 'i' to insert)",
+            Mode::Delete => "Press 'd' again to delete the selected task",
+            Mode::Insert => &todo.new_task_text,
         };
 
         let new_task = Paragraph::new(Text::raw(new_task_text))
-            .block(Block::default().title("Add tasks").borders(Borders::ALL));
+            .block(Block::default().title("Add a task").borders(Borders::ALL));
 
         f.render_widget(tasks, layout[0]);
         f.render_widget(new_task, layout[1]);
@@ -177,12 +268,32 @@ fn handle_input(todo: &mut Todo) -> Result<(), Box<dyn Error>> {
 
             match key.code {
                 _ if todo.mode == Mode::Insert => handle_insert_mode(key, todo),
-                KeyCode::Char('i') => {
+                _ if todo.mode == Mode::Delete => match key.code {
+                    KeyCode::Char('d') => {
+                        todo.delete();
+                        todo.mode = Mode::Normal;
+                    }
+                    KeyCode::Esc => {
+                        todo.mode = Mode::Normal;
+                    }
+                    _ => {}
+                },
+                KeyCode::Char('i') | KeyCode::Char('o') | KeyCode::Char('a') => {
                     todo.new_task_text = String::new();
                     todo.mode = Mode::Insert;
                 }
                 KeyCode::Char('q') => {
                     return Err("Quitting".into());
+                }
+                KeyCode::Up | KeyCode::Char('k') => todo.prev(),
+                KeyCode::Down | KeyCode::Char('j') => todo.next(),
+                KeyCode::Char(' ') | KeyCode::Enter => {
+                    todo.toggle();
+                }
+                KeyCode::Char('d') => {
+                    if todo.mode == Mode::Normal {
+                        todo.mode = Mode::Delete;
+                    }
                 }
                 _ => {}
             }
@@ -211,4 +322,11 @@ fn handle_insert_mode(key: KeyEvent, todo: &mut Todo) {
         }
         _ => {}
     }
+}
+
+fn ensure_dir_exists(path: &PathBuf) -> Result<(), Box<dyn Error>> {
+    if !path.exists() {
+        fs::create_dir_all(path)?;
+    }
+    Ok(())
 }
