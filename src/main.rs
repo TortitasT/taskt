@@ -251,7 +251,19 @@ fn draw(
         };
 
         let new_task = Paragraph::new(Text::raw(new_task_text))
+            .style(match todo.mode {
+                Mode::Normal => Style::default(),
+                Mode::Delete => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Mode::Insert => Style::default().add_modifier(Modifier::BOLD),
+            })
             .block(Block::default().title("Add a task").borders(Borders::ALL));
+
+        if todo.mode == Mode::Insert {
+            f.set_cursor(
+                layout[1].x + new_task_text.len() as u16 + 1,
+                layout[1].y + 1,
+            );
+        }
 
         f.render_widget(tasks, layout[0]);
         f.render_widget(new_task, layout[1]);
