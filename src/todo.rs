@@ -122,12 +122,11 @@ impl Todo {
 
     pub fn load() -> Result<Todo, std::io::Error> {
         let path = get_database_path();
-        let options = get_options();
 
         let data = std::fs::read_to_string(path)?;
 
         let mut todo = Todo::new();
-        todo.tasks = match options.server_address {
+        todo.tasks = match get_options().server_address {
             Some(server_address) => {
                 read_tasks_from_server(server_address).expect("Failed to read tasks from server")
             }
