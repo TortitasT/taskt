@@ -14,3 +14,4 @@ ratatui = { version = "0.21.0", features = ["all-widgets"] }
 crossterm = "0.26.1"
 serde = { version = "1.0.171", features = ["derive"] }
 directories = "5.0.1"
+toml = "0.7.6"

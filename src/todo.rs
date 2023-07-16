@@ -1,4 +1,5 @@
 use std::{
+    fs::File,
     io::{prelude::*, BufReader, Error, Write},
     net::TcpStream,
     path::PathBuf,
@@ -10,10 +11,23 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::ListItem,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{ensure_dir_exists, task::Task, Mode};
 
 const DB_FILE: &str = "db.json";
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Options {
+    server_address: Option<String>,
+}
+impl Options {
+    fn default() -> Self {
+        Self {
+            server_address: None,
+        }
+    }
+}
 
 pub struct Todo {
     pub tasks: Vec<Task>,
@@ -96,29 +110,31 @@ impl Todo {
 
         let path = get_database_path();
 
-        send_tasks_to_server(&self).expect("Failed to send todo to server");
-
-        match std::fs::write(path, data) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
+        match get_options().server_address {
+            Some(server_address) => {
+                send_tasks_to_server(&self, server_address).expect("Unable to send tasks to server")
+            }
+            None => std::fs::write(path, data).expect("Unable to write file"),
         }
+
+        Ok(())
     }
 
     pub fn load() -> Result<Todo, std::io::Error> {
         let path = get_database_path();
+        let options = get_options();
 
         let data = std::fs::read_to_string(path)?;
 
-        let mut tasks: Vec<Task> = serde_json::from_str(&data)?;
+        let mut todo = Todo::new();
+        todo.tasks = match options.server_address {
+            Some(server_address) => {
+                read_tasks_from_server(server_address).expect("Failed to read tasks from server")
+            }
+            None => serde_json::from_str(&data)?,
+        };
 
-        tasks = read_tasks_from_server().expect("Failed to read tasks from server");
-
-        Ok(Todo {
-            tasks,
-            new_task_text: String::new(),
-            mode: Mode::Normal,
-            current_task: 0,
-        })
+        Ok(todo)
     }
 
     pub fn prev(&mut self) {
@@ -145,7 +161,7 @@ fn get_database_path() -> PathBuf {
     path.join(DB_FILE)
 }
 
-fn send_tasks_to_server(todo: &Todo) -> Result<(), Error> {
+fn send_tasks_to_server(todo: &Todo, server_address: String) -> Result<(), Error> {
     let mut input = String::from("write\n");
 
     input.push_str(
@@ -154,7 +170,7 @@ fn send_tasks_to_server(todo: &Todo) -> Result<(), Error> {
             .as_str(),
     );
 
-    let mut stream = TcpStream::connect("127.0.0.1:7878")?;
+    let mut stream = TcpStream::connect(server_address)?;
 
     stream.write(input.as_bytes()).expect("Failed to write");
 
@@ -165,10 +181,10 @@ fn send_tasks_to_server(todo: &Todo) -> Result<(), Error> {
     Ok(())
 }
 
-fn read_tasks_from_server() -> Result<Vec<Task>, Error> {
+fn read_tasks_from_server(server_address: String) -> Result<Vec<Task>, Error> {
     let input = String::from("read\n");
 
-    let mut stream = TcpStream::connect("127.0.0.1:7878")?;
+    let mut stream = TcpStream::connect(server_address)?;
 
     stream.write(input.as_bytes()).expect("Failed to write");
 
@@ -179,4 +195,27 @@ fn read_tasks_from_server() -> Result<Vec<Task>, Error> {
     let response = str::from_utf8(&buffer).unwrap();
 
     serde_json::from_str(&response).map_err(|e| e.into())
+}
+
+fn get_options() -> Options {
+    let path = ProjectDirs::from("eu", "tortitas", "todot")
+        .unwrap()
+        .config_dir()
+        .to_path_buf();
+
+    ensure_dir_exists(&path).unwrap();
+
+    let path = path.join("config.toml");
+
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return Options::default(),
+    };
+
+    let mut contents = String::new();
+
+    file.read_to_string(&mut contents)
+        .expect("Failed to read config file");
+
+    toml::from_str(&contents).expect("Failed to parse config file")
 }
