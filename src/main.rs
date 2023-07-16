@@ -4,7 +4,7 @@ mod todo;
 use std::{
     error::Error,
     fs,
-    io::{self, prelude::*, Stdout},
+    io::{self, Stdout},
     path::PathBuf,
     time::Duration,
 };

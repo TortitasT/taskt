@@ -1,4 +1,9 @@
-use std::path::PathBuf;
+use std::{
+    io::{prelude::*, BufReader, Error, Write},
+    net::TcpStream,
+    path::PathBuf,
+    str,
+};
 
 use directories::ProjectDirs;
 use ratatui::{
@@ -49,7 +54,7 @@ impl Todo {
     pub fn list(&self) -> Vec<ListItem> {
         let mut items = Vec::new();
 
-        for (index, task) in self.tasks.iter().enumerate() {
+        for (_, task) in self.tasks.iter().enumerate() {
             let formated_status = if task.completed { "[x]" } else { "[ ]" };
 
             let list_item = ListItem::new(format!("{} {}", formated_status, task.text));
@@ -91,6 +96,8 @@ impl Todo {
 
         let path = get_database_path();
 
+        send_tasks_to_server(&self).expect("Failed to send todo to server");
+
         match std::fs::write(path, data) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
@@ -102,7 +109,9 @@ impl Todo {
 
         let data = std::fs::read_to_string(path)?;
 
-        let tasks: Vec<Task> = serde_json::from_str(&data)?;
+        let mut tasks: Vec<Task> = serde_json::from_str(&data)?;
+
+        tasks = read_tasks_from_server().expect("Failed to read tasks from server");
 
         Ok(Todo {
             tasks,
@@ -134,4 +143,40 @@ fn get_database_path() -> PathBuf {
     ensure_dir_exists(&path).unwrap();
 
     path.join(DB_FILE)
+}
+
+fn send_tasks_to_server(todo: &Todo) -> Result<(), Error> {
+    let mut input = String::from("write\n");
+
+    input.push_str(
+        serde_json::to_string(&todo.tasks)
+            .expect("Failed to serialize tasks")
+            .as_str(),
+    );
+
+    let mut stream = TcpStream::connect("127.0.0.1:7878")?;
+
+    stream.write(input.as_bytes()).expect("Failed to write");
+
+    let mut reader = BufReader::new(&stream);
+    let mut buffer: Vec<u8> = Vec::new();
+    reader.read_until(b'\n', &mut buffer)?;
+
+    Ok(())
+}
+
+fn read_tasks_from_server() -> Result<Vec<Task>, Error> {
+    let input = String::from("read\n");
+
+    let mut stream = TcpStream::connect("127.0.0.1:7878")?;
+
+    stream.write(input.as_bytes()).expect("Failed to write");
+
+    let mut reader = BufReader::new(&stream);
+    let mut buffer: Vec<u8> = Vec::new();
+    reader.read_until(b'\n', &mut buffer)?;
+
+    let response = str::from_utf8(&buffer).unwrap();
+
+    serde_json::from_str(&response).map_err(|e| e.into())
 }
