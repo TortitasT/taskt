@@ -1,14 +1,33 @@
-use std::path::PathBuf;
+use std::{
+    fs::File,
+    io::{prelude::*, BufReader, Error, Write},
+    net::TcpStream,
+    path::PathBuf,
+    str,
+};
 
 use directories::ProjectDirs;
 use ratatui::{
     style::{Color, Modifier, Style},
     widgets::ListItem,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{ensure_dir_exists, task::Task, Mode};
 
 const DB_FILE: &str = "db.json";
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Options {
+    server_address: Option<String>,
+}
+impl Options {
+    fn default() -> Self {
+        Self {
+            server_address: None,
+        }
+    }
+}
 
 pub struct Todo {
     pub tasks: Vec<Task>,
@@ -49,7 +68,7 @@ impl Todo {
     pub fn list(&self) -> Vec<ListItem> {
         let mut items = Vec::new();
 
-        for (index, task) in self.tasks.iter().enumerate() {
+        for (_, task) in self.tasks.iter().enumerate() {
             let formated_status = if task.completed { "[x]" } else { "[ ]" };
 
             let list_item = ListItem::new(format!("{} {}", formated_status, task.text));
@@ -91,10 +110,14 @@ impl Todo {
 
         let path = get_database_path();
 
-        match std::fs::write(path, data) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
+        match get_options().server_address {
+            Some(server_address) => {
+                send_tasks_to_server(&self, server_address).expect("Unable to send tasks to server")
+            }
+            None => std::fs::write(path, data).expect("Unable to write file"),
         }
+
+        Ok(())
     }
 
     pub fn load() -> Result<Todo, std::io::Error> {
@@ -102,14 +125,15 @@ impl Todo {
 
         let data = std::fs::read_to_string(path)?;
 
-        let tasks: Vec<Task> = serde_json::from_str(&data)?;
+        let mut todo = Todo::new();
+        todo.tasks = match get_options().server_address {
+            Some(server_address) => {
+                read_tasks_from_server(server_address).expect("Failed to read tasks from server")
+            }
+            None => serde_json::from_str(&data)?,
+        };
 
-        Ok(Todo {
-            tasks,
-            new_task_text: String::new(),
-            mode: Mode::Normal,
-            current_task: 0,
-        })
+        Ok(todo)
     }
 
     pub fn prev(&mut self) {
@@ -134,4 +158,63 @@ fn get_database_path() -> PathBuf {
     ensure_dir_exists(&path).unwrap();
 
     path.join(DB_FILE)
+}
+
+fn send_tasks_to_server(todo: &Todo, server_address: String) -> Result<(), Error> {
+    let mut input = String::from("write\n");
+
+    input.push_str(
+        serde_json::to_string(&todo.tasks)
+            .expect("Failed to serialize tasks")
+            .as_str(),
+    );
+
+    let mut stream = TcpStream::connect(server_address)?;
+
+    stream.write(input.as_bytes()).expect("Failed to write");
+
+    let mut reader = BufReader::new(&stream);
+    let mut buffer: Vec<u8> = Vec::new();
+    reader.read_until(b'\n', &mut buffer)?;
+
+    Ok(())
+}
+
+fn read_tasks_from_server(server_address: String) -> Result<Vec<Task>, Error> {
+    let input = String::from("read\n");
+
+    let mut stream = TcpStream::connect(server_address)?;
+
+    stream.write(input.as_bytes()).expect("Failed to write");
+
+    let mut reader = BufReader::new(&stream);
+    let mut buffer: Vec<u8> = Vec::new();
+    reader.read_until(b'\n', &mut buffer)?;
+
+    let response = str::from_utf8(&buffer).unwrap();
+
+    serde_json::from_str(&response).map_err(|e| e.into())
+}
+
+fn get_options() -> Options {
+    let path = ProjectDirs::from("eu", "tortitas", "todot")
+        .unwrap()
+        .config_dir()
+        .to_path_buf();
+
+    ensure_dir_exists(&path).unwrap();
+
+    let path = path.join("config.toml");
+
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return Options::default(),
+    };
+
+    let mut contents = String::new();
+
+    file.read_to_string(&mut contents)
+        .expect("Failed to read config file");
+
+    toml::from_str(&contents).expect("Failed to parse config file")
 }
